@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert all(row["synthetic"] == "1" for row in rows)
     times = [int(row["host_receive_steady_ns"]) for row in rows]
     assert all(a < b for a, b in zip(times, times[1:]))
-    capture = cv2.VideoCapture(str(recording / "video.avi"))
+    capture = cv2.VideoCapture(str(recording / "video.mp4"))
     decoded = 0
     while True:
         success, frame = capture.read()
@@ -31,9 +31,9 @@ with tempfile.TemporaryDirectory() as directory:
         decoded += 1
     capture.release()
     assert decoded == len(rows), (decoded, len(rows))
-    original = (recording / "video.avi").read_bytes()
+    original = (recording / "video.mp4").read_bytes()
     assert subprocess.run(command, timeout=20).returncode != 0
-    assert (recording / "video.avi").read_bytes() == original
+    assert (recording / "video.mp4").read_bytes() == original
     print(f"PASS: {decoded} decoded frames, timestamps, overwrite protection")
 
     interrupted = pathlib.Path(directory) / "interrupted"
@@ -53,7 +53,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert process.wait(timeout=5) == 0
         with sidecar.open() as stream:
             expected = len(list(csv.DictReader(stream)))
-        capture = cv2.VideoCapture(str(interrupted / "video.avi"))
+        capture = cv2.VideoCapture(str(interrupted / "video.mp4"))
         decoded = 0
         while capture.read()[0]:
             decoded += 1
@@ -110,7 +110,7 @@ with tempfile.TemporaryDirectory() as directory:
         for sidecar in (first_csv, second_csv):
             rows = list(csv.DictReader(sidecar.open()))
             assert [int(row["index"]) for row in rows] == list(range(len(rows)))
-            capture = cv2.VideoCapture(str(sidecar.parent / "video.avi"))
+            capture = cv2.VideoCapture(str(sidecar.parent / "video.mp4"))
             decoded = 0
             while True:
                 success, frame = capture.read()

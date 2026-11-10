@@ -29,7 +29,7 @@ def wait_for(predicate):
 
 def decode(path):
     rows = list(csv.DictReader((Path(path) / "frames.csv").open()))
-    cap = cv2.VideoCapture(str(Path(path) / "video.avi"))
+    cap = cv2.VideoCapture(str(Path(path) / "video.mp4"))
     frames = 0
     while cap.read()[0]:
         frames += 1
@@ -70,6 +70,7 @@ with tempfile.TemporaryDirectory() as temporary:
         start = call("start", "trial_1", "checkpoint-A")
         assert start["ok"] and start["state"] == "recording" and start["frames"] >= 1
         assert start["first_frame_unix_ns"] > 0
+        assert start["codec"] == "h264" and start["video_file"].endswith("/video.mp4")
         again = call("start", "trial_1", "checkpoint-A")
         assert again["path"] == start["path"]
         assert not call("start", "trial_1", "checkpoint-B")["ok"]

@@ -29,7 +29,7 @@ void check(dvpStatus status, const char* operation) {
 struct Options {
     bool synthetic = false, headless = false, list = false, auto_all = false, stdin_control = false;
     double fps = 30, duration = 0, exposure_us = -1, gain = -1;
-    std::string camera, record, recordings_dir = "recordings", control_socket;
+    std::string camera, record, recordings_dir = "recordings", control_socket, codec = "h264";
 };
 double number(const std::string& value) {
     size_t end = 0;
@@ -213,9 +213,9 @@ int main(int argc, char** argv) try {
             std::cout << "dvp_monitor [--list] [--camera FRIENDLY_NAME] [--record NEW_DIRECTORY]\n"
                          "            [--fps 30] [--duration SECONDS] [--headless] [--synthetic]\n"
                          "            [--auto | --exposure-us MICROSECONDS --gain SDK_GAIN]\n"
-                         "            [--recordings-dir DIRECTORY] [--stdin-control] [--control-socket auto|PATH]\n"
+                         "            [--recordings-dir DIRECTORY] [--codec h264|mjpeg] [--stdin-control] [--control-socket auto|PATH]\n"
                          "R or the on-screen button toggles recording without stopping preview.\n"
-                         "Preview by default. Q/Esc exits; Ctrl-C also exits. Recording uses MJPEG AVI\n"
+                         "Preview by default. Q/Esc exits; Ctrl-C also exits. Recording defaults to H.264 MP4\n"
                          "at nominal FPS plus per-frame CSV timestamps. No ROS or robot connection.\n";
             return 0;
         } else if (arg == "--list") opt.list = true;
@@ -235,10 +235,13 @@ int main(int argc, char** argv) try {
             opt.gain = number(value());
             if (opt.gain < 0 || opt.gain > 1000) throw std::runtime_error("Gain outside allowed input range");
         }
+        else if (arg == "--codec") opt.codec = value();
         else if (arg == "--fps") opt.fps = number(value());
         else if (arg == "--duration") opt.duration = number(value());
         else throw std::runtime_error("Unknown option: " + arg);
     }
+    if (opt.codec != "h264" && opt.codec != "mjpeg")
+        throw std::runtime_error("--codec must be h264 or mjpeg");
     if (opt.fps <= 0 || opt.fps > 240 || opt.duration < 0)
         throw std::runtime_error("FPS must be (0,240]; duration must be >= 0");
     if (opt.auto_all && (opt.exposure_us > 0 || opt.gain >= 0))
@@ -277,6 +280,7 @@ int main(int argc, char** argv) try {
     } else if (opt.list) throw std::runtime_error("--list cannot be combined with --synthetic");
     std::ofstream metadata;
     cv::VideoWriter video;
+    const std::string video_filename = opt.codec == "h264" ? "video.mp4" : "video.avi";
     std::string recording_path;
     cv::Size recorded_size;
     uint64_t recorded_frames = 0;
@@ -293,6 +297,8 @@ int main(int argc, char** argv) try {
         control::put(result.get(), "run_id", control_run);
         control::put(result.get(), "model", control_model);
         control::put(result.get(), "path", recording_path);
+        control::put(result.get(), "codec", opt.codec);
+        control::put(result.get(), "video_file", recording_path.empty() ? "" : (std::filesystem::path(recording_path) / video_filename).string());
         control::put(result.get(), "frames", static_cast<int64_t>(recorded_frames));
         control::put(result.get(), "first_frame_unix_ns", first_frame_unix_ns);
         control::put(result.get(), "last_frame_unix_ns", last_frame_unix_ns);
@@ -399,8 +405,10 @@ int main(int argc, char** argv) try {
         auto append_frame = [&]() {
             if (!video.isOpened()) {
                 recorded_size = image.size();
-                if (!video.open(recording_path + "/video.avi", cv::VideoWriter::fourcc('M','J','P','G'), opt.fps, recorded_size))
-                    throw std::runtime_error("Cannot open MJPEG writer");
+                const int fourcc = opt.codec == "h264" ? cv::VideoWriter::fourcc('a','v','c','1') : cv::VideoWriter::fourcc('M','J','P','G');
+                if (!video.open((std::filesystem::path(recording_path) / video_filename).string(),
+                                cv::CAP_FFMPEG, fourcc, opt.fps, recorded_size))
+                    throw std::runtime_error("Cannot open " + opt.codec + " encoder via OpenCV FFmpeg; no silent fallback");
             }
             if (image.size() != recorded_size) throw std::runtime_error("Resolution changed during recording");
             video.write(image);
@@ -511,7 +519,7 @@ int main(int argc, char** argv) try {
     video.release();
     if (metadata.is_open()) metadata.close();
     if (!opt.headless) cv::destroyAllWindows();
-    std::cout << "Stopped after " << frames << " frames. AVI uses nominal FPS; CSV preserves host timing.\n";
+    std::cout << "Stopped after " << frames << " frames. Video uses nominal FPS; CSV preserves host timing.\n";
     return !recording_failed && frames ? 0 : 1;
 } catch (const std::exception& error) {
     std::cerr << "Error: " << error.what() << '\n';

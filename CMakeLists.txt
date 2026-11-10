@@ -34,3 +34,6 @@ set_tests_properties(invalid_exposure invalid_gain PROPERTIES WILL_FAIL TRUE)
 add_test(NAME conflicting_auto_exposure COMMAND dvp_monitor --synthetic --auto --exposure-us 4000)
 add_test(NAME conflicting_auto_gain COMMAND dvp_monitor --synthetic --auto --gain 1)
 set_tests_properties(conflicting_auto_exposure conflicting_auto_gain PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME invalid_codec COMMAND dvp_monitor --synthetic --headless --codec invalid)
+set_tests_properties(invalid_codec PROPERTIES WILL_FAIL TRUE)
