@@ -102,3 +102,7 @@ SDK 可能返回枚举成功，却把 `err:13,Permission denied` 填入 `Friendl
 点击左上角 **START RECORD / STOP RECORD** 按钮，或先选中预览窗口再按 **R**。停止录像后预览继续；每次重新开始都会创建独立的 `recordings/capture-<Unix纳秒>/` 目录，包含 AVI 和 CSV。红色 REC 状态显示时长和帧数；PREVIEW 表示未录像。提示只显示在窗口，不写入视频。Q/Esc/Ctrl-C 保存当前录像并退出。`--recordings-dir PATH` 指定交互录像的父目录；第一次开始录像之前不创建目录。
 
 `--record NEW_DIRECTORY` 仍可用于启动后立即录像；停止再开始的后续片段写入 `--recordings-dir`。额外加 `--stdin-control` 可在终端输入 `r`/`q` 后回车，便于终端控制和离线测试。按键/鼠标操作从下一张采集帧生效。`--fps` 仍为 AVI 标称回放帧率，不是采集时序。录像 I/O 错误会使程序失败退出；短时合成测试不能证明磁盘写满行为。旧进程只需重启一次加载新版，日常切换录像无需重启相机。
+
+## 推理触发录像
+
+使用 `--control-socket auto` 开启可选的同用户本地控制服务。[协议、客户端命令与故障处理](CONTROL_PROTOCOL.zh-CN.md)。构建额外需要 `json-c` 开发文件。仍保留手动预览和录像。

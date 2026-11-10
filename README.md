@@ -103,3 +103,7 @@ The SDK may return successful enumeration but put `err:13,Permission denied` in 
 Click **START RECORD / STOP RECORD** at the top left, or focus the preview window and press **R**. The preview continues after stopping; each next start creates a new `recordings/capture-<unix-nanoseconds>/` folder with AVI and CSV. A red REC status shows elapsed time and frame count; PREVIEW means nothing is being recorded. Overlays are display-only. Q/Esc/Ctrl-C finalizes any active clip and exits. `--recordings-dir PATH` selects the parent folder for interactive recordings; no folder is created until the first start.
 
 `--record NEW_DIRECTORY` remains an optional immediate-start mode; stopping and restarting then creates subsequent clips under `--recordings-dir`. `--stdin-control` additionally accepts `r`/`q` followed by Enter, useful for terminal control and offline tests. Keyboard and mouse actions take effect at the next acquired frame. `--fps` still describes nominal AVI playback, not capture timing. A recording I/O error fails the program; a short synthetic test does not certify disk-full behavior. Existing processes need one restart to load this version; ordinary recording toggles do not restart the camera.
+
+## Inference-triggered recording
+
+Use `--control-socket auto` to enable the optional same-user local control service. [Protocol, client commands and failure handling](CONTROL_PROTOCOL.md). The build additionally requires `json-c` development files. Manual preview/recording remains available.

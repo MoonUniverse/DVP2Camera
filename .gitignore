@@ -4,3 +4,7 @@
 
 # Device-local SDK state
 /*.sdf
+
+# Python control-client bytecode
+__pycache__/
+*.pyc

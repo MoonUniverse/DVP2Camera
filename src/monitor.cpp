@@ -1,4 +1,5 @@
 #include <DVPCamera.h>
+#include "control.hpp"
 #include <dlfcn.h>
 #include <opencv2/opencv.hpp>
 #include <algorithm>
@@ -28,7 +29,7 @@ void check(dvpStatus status, const char* operation) {
 struct Options {
     bool synthetic = false, headless = false, list = false, auto_all = false, stdin_control = false;
     double fps = 30, duration = 0, exposure_us = -1, gain = -1;
-    std::string camera, record, recordings_dir = "recordings";
+    std::string camera, record, recordings_dir = "recordings", control_socket;
 };
 double number(const std::string& value) {
     size_t end = 0;
@@ -212,7 +213,7 @@ int main(int argc, char** argv) try {
             std::cout << "dvp_monitor [--list] [--camera FRIENDLY_NAME] [--record NEW_DIRECTORY]\n"
                          "            [--fps 30] [--duration SECONDS] [--headless] [--synthetic]\n"
                          "            [--auto | --exposure-us MICROSECONDS --gain SDK_GAIN]\n"
-                         "            [--recordings-dir DIRECTORY] [--stdin-control]\n"
+                         "            [--recordings-dir DIRECTORY] [--stdin-control] [--control-socket auto|PATH]\n"
                          "R or the on-screen button toggles recording without stopping preview.\n"
                          "Preview by default. Q/Esc exits; Ctrl-C also exits. Recording uses MJPEG AVI\n"
                          "at nominal FPS plus per-frame CSV timestamps. No ROS or robot connection.\n";
@@ -223,6 +224,7 @@ int main(int argc, char** argv) try {
         else if (arg == "--headless") opt.headless = true;
         else if (arg == "--camera") opt.camera = value();
         else if (arg == "--record") opt.record = value();
+        else if (arg == "--control-socket") opt.control_socket = value();
         else if (arg == "--recordings-dir") opt.recordings_dir = value();
         else if (arg == "--stdin-control") opt.stdin_control = true;
         else if (arg == "--exposure-us") {
@@ -243,6 +245,9 @@ int main(int argc, char** argv) try {
         throw std::runtime_error("--auto cannot be combined with manual exposure/gain");
     std::signal(SIGINT, stop);
     std::signal(SIGTERM, stop);
+    std::unique_ptr<control::Server> control_server;
+    if (!opt.control_socket.empty()) control_server = std::make_unique<control::Server>(opt.control_socket);
+    opt.recordings_dir = std::filesystem::absolute(opt.recordings_dir).lexically_normal().string();
     std::unique_ptr<Camera> camera;
     if (!opt.synthetic) {
         dvpUint32 count = 0;
@@ -276,12 +281,47 @@ int main(int argc, char** argv) try {
     cv::Size recorded_size;
     uint64_t recorded_frames = 0;
     auto recording_start = Clock::now();
-    auto stop_recording = [&]() {
+    std::string control_run, control_model;
+    bool recording_failed = false;
+    int64_t first_frame_unix_ns = 0, last_frame_unix_ns = 0;
+    auto snapshot = [&](const std::string& state, const std::string& reason = "") {
+        auto result = control::object();
+        json_object_object_add(result.get(), "ok", json_object_new_boolean(true));
+        control::put(result.get(), "version", int64_t{1});
+        control::put(result.get(), "state", state);
+        control::put(result.get(), "owner", recording_path.empty() ? "none" : (control_run.empty() ? "manual" : "inference"));
+        control::put(result.get(), "run_id", control_run);
+        control::put(result.get(), "model", control_model);
+        control::put(result.get(), "path", recording_path);
+        control::put(result.get(), "frames", static_cast<int64_t>(recorded_frames));
+        control::put(result.get(), "first_frame_unix_ns", first_frame_unix_ns);
+        control::put(result.get(), "last_frame_unix_ns", last_frame_unix_ns);
+        control::put(result.get(), "reported_unix_ns", control::unix_ns());
+        control::put(result.get(), "reason", reason);
+        json_object_object_add(result.get(), "synthetic", json_object_new_boolean(opt.synthetic));
+        json_object_object_add(result.get(), "nominal_fps", json_object_new_double(opt.fps));
+        return result;
+    };
+    auto save_manifest = [&](json_object* value) {
+        if (control_run.empty()) return;
+        auto temporary = std::filesystem::path(recording_path) / "run.json.tmp";
+        std::ofstream output;
+        output.exceptions(std::ios::failbit | std::ios::badbit);
+        output.open(temporary);
+        output << control::dump(value) << '\n'; output.close();
+        std::filesystem::rename(temporary, std::filesystem::path(recording_path) / "run.json");
+    };
+    auto stop_recording = [&](const std::string& reason = "manual") {
         video.release();
         if (metadata.is_open()) metadata.close();
         if (!recording_path.empty())
             std::cout << "Saved " << recorded_frames << " frames to " << recording_path << std::endl;
+        if (!control_run.empty()) {
+            auto result = snapshot(recording_failed ? "failed" : "stopped", reason);
+            save_manifest(result.get());
+        }
         recording_path.clear();
+        control_run.clear(); control_model.clear();
     };
     auto start_recording = [&](const std::string& path) {
         if (!std::filesystem::create_directory(path))
@@ -289,12 +329,18 @@ int main(int argc, char** argv) try {
         metadata.exceptions(std::ios::failbit | std::ios::badbit);
         metadata.open(path + "/frames.csv");
         metadata << "index,sdk_frame_id,sdk_timestamp_raw,host_receive_steady_ns,host_receive_unix_ns,synthetic,exposure_us,analog_gain\n";
-        recording_path = path;
+        recording_failed = false;
+        recording_path = std::filesystem::absolute(path).lexically_normal().string();
         recorded_frames = 0;
+        first_frame_unix_ns = 0; last_frame_unix_ns = 0;
         recording_start = Clock::now();
         std::cout << "Recording started: " << path << std::endl;
     };
     auto toggle_recording = [&]() {
+        if (!control_run.empty()) {
+            std::cerr << "Recording belongs to inference run " << control_run << "; R cannot stop it. Q exits the monitor.\n";
+            return;
+        }
         if (!recording_path.empty()) {
             stop_recording();
         } else {
@@ -350,7 +396,7 @@ int main(int argc, char** argv) try {
             toggle_recording();
         }
         if (stopped) break;
-        if (!recording_path.empty()) {
+        auto append_frame = [&]() {
             if (!video.isOpened()) {
                 recorded_size = image.size();
                 if (!video.open(recording_path + "/video.avi", cv::VideoWriter::fourcc('M','J','P','G'), opt.fps, recorded_size))
@@ -360,15 +406,77 @@ int main(int argc, char** argv) try {
             video.write(image);
             metadata << recorded_frames << ',' << frame.uFrameID << ',' << frame.uTimestamp << ',' << steady_ns << ',' << unix_ns << ',' << opt.synthetic << ',' << frame.fExposure << ',' << frame.fAGain << '\n';
             metadata.flush();
+            if (!recorded_frames) first_frame_unix_ns = unix_ns;
+            last_frame_unix_ns = unix_ns;
             ++recorded_frames;
-        }
+        };
+        bool frame_written = false;
+        if (control_server) control_server->poll([&](json_object* request) -> control::Json {
+            if (recording_failed) return control::error("recorder_failed", "Recorder is shutting down after an I/O failure");
+            json_object* version = nullptr;
+            if (!json_object_object_get_ex(request, "version", &version) ||
+                !json_object_is_type(version, json_type_int) || json_object_get_int64(version) != 1)
+                return control::error("bad_version", "Expected version 1");
+            const std::string command = control::get(request, "command");
+            if (command != "start" && command != "stop" && command != "status")
+                return control::error("bad_command", "Use start, stop or status");
+            const std::string run = control::get(request, "run_id", command != "status");
+            if (run.empty() && command == "status")
+                return snapshot(recording_path.empty() ? "idle" : "recording");
+            if (run.empty() || run.size() > 100 || !std::all_of(run.begin(), run.end(), [](unsigned char ch) {
+                    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-'; }))
+                return control::error("bad_run_id", "Use 1..100 ASCII letters, digits, underscore or dash");
+            const std::string model = control::get(request, "model", false);
+            if (model.size() > 1024) return control::error("bad_model", "Model exceeds 1024 bytes");
+            if (run == control_run && !recording_path.empty()) {
+                if (command == "start" && model != control_model)
+                    return control::error("metadata_conflict", "Same run_id has different model");
+                if (command != "stop") return snapshot("recording");
+                auto result = snapshot("stopped", "requested");
+                stop_recording("requested");
+                return result;
+            }
+            const auto directory = std::filesystem::path(opt.recordings_dir) / ("run-" + run);
+            if (std::filesystem::exists(directory)) {
+                std::ifstream input(directory / "run.json");
+                if (!input) return control::error("incomplete_run", "Existing run has no readable manifest; choose a new run_id");
+                std::string raw((std::istreambuf_iterator<char>(input)), {});
+                while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back()))) raw.pop_back();
+                auto prior = control::parse(raw);
+                std::string state = control::get(prior.get(), "state");
+                if (state == "recording" || state == "starting") {
+                    control::put(prior.get(), "state", "interrupted");
+                    control::put(prior.get(), "reason", "not_active_in_this_monitor");
+                }
+                if (command == "start" && model != control::get(prior.get(), "model"))
+                    return control::error("metadata_conflict", "Same run_id has different model");
+                return prior; // Never restart an old run, including after process restart.
+            }
+            if (command != "start") return control::error("unknown_run", "No recording for this run_id");
+            if (!recording_path.empty()) return control::error("busy", "A manual recording or another run owns the recorder");
+            std::filesystem::create_directories(opt.recordings_dir);
+            try {
+                start_recording(directory.string());
+                control_run = run; control_model = model;
+                append_frame(); frame_written = true;
+                auto result = snapshot("recording");
+                save_manifest(result.get());
+                return result; // First frame and CSV row accepted before success.
+            } catch (...) {
+                recording_failed = true;
+                stopped = 1; // Do not keep publishing success after a recording I/O failure.
+                throw;
+            }
+        });
+        if (stopped) break;
+        if (!recording_path.empty() && !frame_written) append_frame();
         ++frames;
         if (!opt.headless) {
             // Draw controls on the preview copy only, never on the recorded image.
             cv::Mat display = image.clone();
             const bool recording = !recording_path.empty();
             cv::rectangle(display, {10, 10}, {250, 55}, recording ? cv::Scalar(0, 0, 180) : cv::Scalar(60, 60, 60), -1);
-            cv::putText(display, recording ? "STOP RECORD [R]" : "START RECORD [R]",
+            cv::putText(display, recording ? (control_run.empty() ? "STOP RECORD [R]" : "INFERENCE RECORD") : "START RECORD [R]",
                         {20, 40}, cv::FONT_HERSHEY_SIMPLEX, 0.65, {255, 255, 255}, 2);
             const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - recording_start).count();
             std::string status = recording ? "REC " + std::to_string(elapsed) + "s  " + std::to_string(recorded_frames) + " frames"
@@ -387,7 +495,7 @@ int main(int argc, char** argv) try {
             std::this_thread::sleep_until(next);
         }
     }
-    stop_recording();
+    stop_recording("monitor_exit");
     if (camera && opt.auto_all) {
         double exposure = 0;
         float gain = 0;
@@ -404,7 +512,7 @@ int main(int argc, char** argv) try {
     if (metadata.is_open()) metadata.close();
     if (!opt.headless) cv::destroyAllWindows();
     std::cout << "Stopped after " << frames << " frames. AVI uses nominal FPS; CSV preserves host timing.\n";
-    return frames ? 0 : 1;
+    return !recording_failed && frames ? 0 : 1;
 } catch (const std::exception& error) {
     std::cerr << "Error: " << error.what() << '\n';
     return 1;
