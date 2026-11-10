@@ -1,0 +1,79 @@
+# DVP workstation monitor
+
+[简体中文](README.zh-CN.md)
+
+Standalone C++17 / OpenCV program for external live monitoring and optional recording.
+No ROS, robot commands, or policy input. Original ROS source remains in Git history.
+
+## Build
+
+Requires CMake >= 3.18, a C++17 compiler, OpenCV development libraries, and the vendor's Linux x86-64 SDK. The supplied SDK stays local and is ignored by Git; keep its libraries and camera plugins together. Existing legacy SDK files under `include/` are retained but not used by this build. Do not mix SDK headers and binaries.
+
+```bash
+cmake -S . -B build -DDVP_SDK_ROOT="$PWD/DVP2-Linux64_231122/DVP2-Linux64"
+cmake --build build -j4
+```
+
+Build RPATH points to the supplied SDK directory; CMake also symlinks its runtime libraries/plugins beside the executable for the vendor loader. No vendor installation script, kernel module, network configuration, ROS setup or root privilege is applied by this project. Camera-specific OS permissions and connectivity may still require separate setup.
+
+## Use
+
+Run from this repository. Start with device discovery, then select a printed friendly name if multiple cameras exist:
+
+```bash
+./build/dvp_monitor --list
+./build/dvp_monitor --camera 'NAME'
+./build/dvp_monitor --camera 'NAME' --record recordings-001 --fps 30
+```
+
+One camera is selected automatically if `--camera` is omitted. Q, Escape, window close or Ctrl-C stops capture and finalizes the video. `--headless` disables the window; `--duration 60` bounds the run. Recording starts immediately when `--record NEW_DIRECTORY` is supplied; its parent must exist and the directory must not already exist. Preview alone writes nothing.
+
+Each recording contains `video.avi` (MJPEG) and `frames.csv`. MJPEG files can be large. `--fps` sets the **nominal playback FPS**, not the physical camera capture rate. Playback duration can differ from elapsed capture time. CSV records SDK frame ID/raw SDK timestamp and host monotonic/Unix timestamps after the image has been copied. Host timestamps are receive-side observations, not exposure timestamps; SDK timestamp units and clock relation are unverified. Synthetic records are explicitly marked.
+
+Continuous capture requests BGR24 and disables external triggering for this open session; exposure and gain retain camera settings unless overridden; ROI retains camera settings. Unsupported formats/strides, SDK errors/timeouts, and resolution changes during recording fail explicitly. Stop/close is attempted on normal and exception exits. There is no automatic reconnection or frame replay.
+
+This initial version performs acquisition, preview and encoding serially. Slow encoding/storage can delay acquisition; low latency and lossless capture are not guaranteed. SDK frame IDs help reveal gaps. OpenCV VideoWriter has limited write-error reporting: a finalized file is not a guarantee of complete footage; check disk space and decode recordings. No calibration or CameraInfo is fabricated.
+
+## Offline checks
+
+```bash
+ctest --test-dir build --output-on-failure
+/usr/bin/python3 tests/recording_test.py build/dvp_monitor
+./build/dvp_monitor --synthetic --duration 10
+```
+
+The Python check requires system `cv2`. Synthetic checks exercise video decoding, metadata and overwrite protection without opening hardware. Actual camera discovery, GUI display, disconnect behavior and sustained capture/recording performance require workstation validation. The supplied SDK emits `LoadDbgConfig, LoadFile fail, err:-3` during startup in this environment; offline tests still pass, but this does not validate real camera operation.
+
+## Workstation capture verification — 2026-11-10
+
+The M3S130-H-O2C#U016500000370 was enumerated after the operator granted device-node access. A 10-second headless run produced 664 decodable 1280×1024 frames with matching CSV rows, 9.969 seconds between first/last host timestamps (66.506 FPS), and no SDK frame-ID gaps. AVI was encoded at nominal 60 FPS, so playback duration differs. Evidence is local under `recordings/headless-20261110-102529/verification.json`. The image is overexposed and sideways; exposure/orientation still need adjustment. This short run is not a sustained-performance or disconnect test.
+
+SDK loading is now lazy: preload vendor camera plugins with Linux `RTLD_DEEPBIND`, then load `libdvp` and resolve its API. The vendor USB plugin embeds libusb; direct linking allowed OpenCV/gphoto's system libusb symbols to interpose and crashed in `libusb_get_next_timeout`. SDK and system libraries remain unchanged. Synthetic mode does not load SDK libraries. Preview treats unsupported visibility (`-1`) separately from an explicitly hidden window (`0`); use Q/Esc or Ctrl-C when a backend cannot report window closing.
+
+After correcting the unsupported window-visibility result, a 10-second run with preview recorded and decoded all 666 frames (1280×1024, 66.570 observed FPS, zero SDK frame-ID gaps). Evidence: `recordings/preview-20261110-102645/verification.json`. The X11 window was observed. Q/Esc remains the portable exit method.
+
+## Manual exposure — 2026-11-10
+
+The current workstation scene was overexposed at SDK readback 15002.4 microseconds / gain 2 (auto exposure already off). Start with this tested setting:
+
+```bash
+./build/dvp_monitor --exposure-us 4000 --gain 1
+```
+
+Actual readback was 3997.68 microseconds / gain 1. A 3-second preview recording decoded all 211 frames. At the observed scene, 2 ms was dark and 6 ms clipped more highlights; 4 ms is a practical initial compromise, not automatic exposure or universal calibration. Camera placement changed during the user's setup, so the original sideways view is not a matched before/after comparison. No image rotation or brightness postprocessing is applied. Bright lamps may still clip.
+
+Either manual flag disables automatic exposure; omitted flags leave the corresponding value unchanged. SDK rejects unsupported values. Settings were observed to survive close/reopen while connected; this program does not save nonvolatile device defaults, and persistence across power cycles is unverified. CSV now appends SDK-reported per-frame `exposure_us` and `analog_gain`. The selected camera settings affect other applications opening the same device later.
+
+## Continuous automatic monitoring — 2026-11-10
+
+```bash
+./build/dvp_monitor --auto
+# Optional recording:
+./build/dvp_monitor --auto --record NEW_DIRECTORY --fps 60
+```
+
+`--auto` enables continuous automatic exposure AND analog gain (exposure priority) plus continuous automatic white balance. It neutralizes RGB processing gains to 1 and disables the color-temperature effect as required by the SDK white-balance documentation. Exposure ceiling is the smaller of the existing ceiling and 10000 microseconds; gain ceiling is the smaller of the existing ceiling and 4. The tested camera read back exposure 1–10000 microseconds and gain 1–3, AE mode 0, AE operation 2, AWB operation 2. Unsupported settings or readback mismatch fail explicitly. Automatic and manual flags cannot be combined. Metering region and brightness target remain camera settings; no ROI calibration is implied.
+
+A 10-second recording decoded all 1018 frames. An 8-second dark-start recovery test decoded all 818 frames; grayscale mean rose from 18.70 to 95.68. This demonstrates brightness adaptation in this scene; continuous gain was enabled but stayed at 1, and white-balance mode was verified without controlled color-temperature testing. Bright lamps can still clip. No rotation or postprocessing was applied.
+
+**SDK metadata limitation:** `frames.csv` preserves raw SDK `exposure_us`/`analog_gain`; exposure stayed constant in frame metadata during visible automatic recovery, so these fields are not authoritative per-frame applied settings in auto mode. Startup/final live API queries provide separate snapshots. Automatic settings may persist across reopening; this program does not call nonvolatile-save APIs. Use `--auto` explicitly when starting to reapply and verify the monitoring profile.

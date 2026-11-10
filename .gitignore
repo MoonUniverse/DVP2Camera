@@ -1,0 +1,6 @@
+/build/
+/recordings/
+/DVP2-Linux64_231122/
+
+# Device-local SDK state
+/*.sdf
