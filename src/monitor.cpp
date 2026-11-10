@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -12,6 +13,9 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
+#include <poll.h>
+#include <unistd.h>
 
 namespace {
 volatile std::sig_atomic_t stopped = 0;
@@ -22,9 +26,9 @@ void check(dvpStatus status, const char* operation) {
         throw std::runtime_error(std::string(operation) + ": SDK status " + std::to_string(status));
 }
 struct Options {
-    bool synthetic = false, headless = false, list = false, auto_all = false;
+    bool synthetic = false, headless = false, list = false, auto_all = false, stdin_control = false;
     double fps = 30, duration = 0, exposure_us = -1, gain = -1;
-    std::string camera, record;
+    std::string camera, record, recordings_dir = "recordings";
 };
 double number(const std::string& value) {
     size_t end = 0;
@@ -208,6 +212,8 @@ int main(int argc, char** argv) try {
             std::cout << "dvp_monitor [--list] [--camera FRIENDLY_NAME] [--record NEW_DIRECTORY]\n"
                          "            [--fps 30] [--duration SECONDS] [--headless] [--synthetic]\n"
                          "            [--auto | --exposure-us MICROSECONDS --gain SDK_GAIN]\n"
+                         "            [--recordings-dir DIRECTORY] [--stdin-control]\n"
+                         "R or the on-screen button toggles recording without stopping preview.\n"
                          "Preview by default. Q/Esc exits; Ctrl-C also exits. Recording uses MJPEG AVI\n"
                          "at nominal FPS plus per-frame CSV timestamps. No ROS or robot connection.\n";
             return 0;
@@ -217,6 +223,8 @@ int main(int argc, char** argv) try {
         else if (arg == "--headless") opt.headless = true;
         else if (arg == "--camera") opt.camera = value();
         else if (arg == "--record") opt.record = value();
+        else if (arg == "--recordings-dir") opt.recordings_dir = value();
+        else if (arg == "--stdin-control") opt.stdin_control = true;
         else if (arg == "--exposure-us") {
             opt.exposure_us = number(value());
             if (opt.exposure_us <= 0) throw std::runtime_error("Exposure must be positive");
@@ -239,32 +247,77 @@ int main(int argc, char** argv) try {
     if (!opt.synthetic) {
         dvpUint32 count = 0;
         check(sdk().dvpRefresh(&count), "enumerate cameras");
+        std::vector<std::string> available;
         for (dvpUint32 i = 0; i < count; ++i) {
             dvpCameraInfo info{};
             check(sdk().dvpEnum(i, &info), "camera information");
-            std::cout << i << ": " << info.FriendlyName << '\n';
-            if (count == 1 && opt.camera.empty()) opt.camera = info.FriendlyName;
+            const std::string name(info.FriendlyName, strnlen(info.FriendlyName, sizeof(info.FriendlyName)));
+            // This SDK can return OK while replacing the name with an error.
+            if (name.empty() || name.rfind("err:", 0) == 0) {
+                std::cerr << "Camera " << i << " unavailable: " << name
+                          << ". Check current USB device permissions; see README.\n";
+                continue;
+            }
+            std::cout << i << ": " << name << '\n';
+            available.push_back(name);
         }
+        if (available.empty()) throw std::runtime_error("No accessible camera; SDK open was not attempted");
         if (opt.list) return 0;
-        if (!count) throw std::runtime_error("No camera found");
+        if (available.size() == 1 && opt.camera.empty()) opt.camera = available.front();
         if (opt.camera.empty()) throw std::runtime_error("Multiple cameras: select --camera FRIENDLY_NAME");
+        if (std::find(available.begin(), available.end(), opt.camera) == available.end())
+            throw std::runtime_error("Selected camera was not enumerated as accessible");
         camera = std::make_unique<Camera>(opt.camera);
         camera->start(opt);
     } else if (opt.list) throw std::runtime_error("--list cannot be combined with --synthetic");
     std::ofstream metadata;
     cv::VideoWriter video;
-    if (!opt.record.empty()) {
-        if (!std::filesystem::create_directory(opt.record))
+    std::string recording_path;
+    cv::Size recorded_size;
+    uint64_t recorded_frames = 0;
+    auto recording_start = Clock::now();
+    auto stop_recording = [&]() {
+        video.release();
+        if (metadata.is_open()) metadata.close();
+        if (!recording_path.empty())
+            std::cout << "Saved " << recorded_frames << " frames to " << recording_path << std::endl;
+        recording_path.clear();
+    };
+    auto start_recording = [&](const std::string& path) {
+        if (!std::filesystem::create_directory(path))
             throw std::runtime_error("Recording directory already exists; choose a new directory");
         metadata.exceptions(std::ios::failbit | std::ios::badbit);
-        metadata.open(opt.record + "/frames.csv");
+        metadata.open(path + "/frames.csv");
         metadata << "index,sdk_frame_id,sdk_timestamp_raw,host_receive_steady_ns,host_receive_unix_ns,synthetic,exposure_us,analog_gain\n";
+        recording_path = path;
+        recorded_frames = 0;
+        recording_start = Clock::now();
+        std::cout << "Recording started: " << path << std::endl;
+    };
+    auto toggle_recording = [&]() {
+        if (!recording_path.empty()) {
+            stop_recording();
+        } else {
+            std::filesystem::create_directories(opt.recordings_dir);
+            auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            start_recording((std::filesystem::path(opt.recordings_dir) /
+                             ("capture-" + std::to_string(stamp))).string());
+        }
+    };
+    if (!opt.record.empty()) start_recording(opt.record);
+    bool toggle_requested = false;
+    constexpr auto window = "DVP monitor - R record / Q quit";
+    if (!opt.headless) {
+        cv::namedWindow(window, cv::WINDOW_NORMAL);
+        cv::setMouseCallback(window, [](int event, int x, int y, int, void* pointer) {
+            if (event == cv::EVENT_LBUTTONUP && x >= 10 && x <= 250 && y >= 10 && y <= 55)
+                *static_cast<bool*>(pointer) = true;
+        }, &toggle_requested);
     }
-    if (!opt.headless) cv::namedWindow("DVP monitor - Q to quit", cv::WINDOW_NORMAL);
     const auto begin = Clock::now();
     auto next = begin;
     uint64_t frames = 0;
-    cv::Size recorded_size;
     while (!stopped) {
         if (opt.duration > 0 && std::chrono::duration<double>(Clock::now() - begin).count() >= opt.duration) break;
         cv::Mat image;
@@ -282,24 +335,51 @@ int main(int argc, char** argv) try {
         }
         const auto steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
         const auto unix_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-        if (!opt.record.empty()) {
+        if (opt.stdin_control) {
+            pollfd input{STDIN_FILENO, POLLIN, 0};
+            if (poll(&input, 1, 0) > 0 && (input.revents & POLLIN)) {
+                char command = 0;
+                if (read(STDIN_FILENO, &command, 1) == 1) {
+                    if (command == 'r' || command == 'R') toggle_requested = true;
+                    if (command == 'q' || command == 'Q') stopped = 1;
+                }
+            }
+        }
+        if (toggle_requested) {
+            toggle_requested = false;
+            toggle_recording();
+        }
+        if (stopped) break;
+        if (!recording_path.empty()) {
             if (!video.isOpened()) {
                 recorded_size = image.size();
-                if (!video.open(opt.record + "/video.avi", cv::VideoWriter::fourcc('M','J','P','G'), opt.fps, recorded_size))
+                if (!video.open(recording_path + "/video.avi", cv::VideoWriter::fourcc('M','J','P','G'), opt.fps, recorded_size))
                     throw std::runtime_error("Cannot open MJPEG writer");
             }
             if (image.size() != recorded_size) throw std::runtime_error("Resolution changed during recording");
             video.write(image);
-            metadata << frames << ',' << frame.uFrameID << ',' << frame.uTimestamp << ',' << steady_ns << ',' << unix_ns << ',' << opt.synthetic << ',' << frame.fExposure << ',' << frame.fAGain << '\n';
+            metadata << recorded_frames << ',' << frame.uFrameID << ',' << frame.uTimestamp << ',' << steady_ns << ',' << unix_ns << ',' << opt.synthetic << ',' << frame.fExposure << ',' << frame.fAGain << '\n';
             metadata.flush();
+            ++recorded_frames;
         }
         ++frames;
         if (!opt.headless) {
-            cv::imshow("DVP monitor - Q to quit", image);
+            // Draw controls on the preview copy only, never on the recorded image.
+            cv::Mat display = image.clone();
+            const bool recording = !recording_path.empty();
+            cv::rectangle(display, {10, 10}, {250, 55}, recording ? cv::Scalar(0, 0, 180) : cv::Scalar(60, 60, 60), -1);
+            cv::putText(display, recording ? "STOP RECORD [R]" : "START RECORD [R]",
+                        {20, 40}, cv::FONT_HERSHEY_SIMPLEX, 0.65, {255, 255, 255}, 2);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - recording_start).count();
+            std::string status = recording ? "REC " + std::to_string(elapsed) + "s  " + std::to_string(recorded_frames) + " frames"
+                                           : "PREVIEW - not recording";
+            cv::putText(display, status, {10, 85}, cv::FONT_HERSHEY_SIMPLEX, 0.65, {0, 255, 255}, 2);
+            cv::imshow(window, display);
             int key = cv::waitKey(1) & 0xff;
+            if (key == 'r' || key == 'R') toggle_requested = true;
             // Some OpenCV GUI backends return -1 for unsupported visibility.
             // Only a supported, explicitly invisible window means close.
-            if (key == 'q' || key == 27 || cv::getWindowProperty("DVP monitor - Q to quit", cv::WND_PROP_VISIBLE) == 0) break;
+            if (key == 'q' || key == 27 || cv::getWindowProperty(window, cv::WND_PROP_VISIBLE) == 0) break;
         }
         // Only the fake source is paced. Real capture keeps draining the SDK.
         if (opt.synthetic) {
@@ -307,6 +387,7 @@ int main(int argc, char** argv) try {
             std::this_thread::sleep_until(next);
         }
     }
+    stop_recording();
     if (camera && opt.auto_all) {
         double exposure = 0;
         float gain = 0;

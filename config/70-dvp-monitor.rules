@@ -1,0 +1,2 @@
+# Local desktop access for the tested M3S130-H-O2C USB camera only.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="04b4", ATTR{idProduct}=="d003", TAG+="uaccess"

@@ -76,3 +76,29 @@ SDK 改为延迟加载：先用 Linux `RTLD_DEEPBIND` 加载厂家相机插件�
 10 秒录像全部 1018 帧解码通过。8 秒暗起点恢复测试全部 818 帧解码通过，灰度均值从 18.70 升至 95.68，证明此场景下亮度自动适应有效；自动增益已开启但保持 1，白平衡模式已回读确认，未做受控色温变化测试。明亮灯条仍可能饱和。未旋转或后处理画面。
 
 **SDK 元数据限制：** `frames.csv` 保留 SDK 原始 `exposure_us`/`analog_gain`；可见自动恢复期间，帧元数据中的曝光却保持不变，因此自动模式下不能把这些列作为逐帧实际设置的权威值。启动/退出时直接查询 API 的结果属于独立状态快照。自动设置可能在重新打开后保留；本程序不调用非易失保存 API。每次启动显式使用 `--auto` 可重新应用并验证监控配置。
+
+## USB 权限恢复
+
+重新连接后 USB 总线/设备编号可能变化，单次 `setfacl` 不会在设备节点重建后保留。提供的规则仅为 USB VID:PID `04b4:d003` 授予当前本地图形桌面用户访问权。安装一次后，实际拔插相机：
+
+```bash
+sudo install -m 0644 config/70-dvp-monitor.rules /etc/udev/rules.d/70-dvp-monitor.rules
+sudo udevadm control --reload-rules
+# 拔插相机后：
+./build/dvp_monitor --list
+./build/dvp_monitor --auto
+```
+
+以上管理员命令由操作员执行，本项目未执行。`uaccess` 面向当前本地图形桌面会话，不面向无桌面/远程服务账户。临时恢复可先用 `lsusb -d 04b4:d003` 查当前总线/设备号，再执行 `sudo setfacl -m u:alienware:rw /dev/bus/usb/BUS/DEVICE`。不要复用旧设备编号。
+
+SDK 可能返回枚举成功，却把 `err:13,Permission denied` 填入 `FriendlyName`。程序现在拒绝此类条目，明确报错退出，不调用 SDK 打开操作；显式指定的名称也必须匹配可访问的枚举条目。这避免了已观察到的权限分支崩溃，但不意味着消除了 SDK 内部的拔插竞态。
+
+## 不重启程序即可开始/停止录像
+
+```bash
+./build/dvp_monitor --auto --fps 60
+```
+
+点击左上角 **START RECORD / STOP RECORD** 按钮，或先选中预览窗口再按 **R**。停止录像后预览继续；每次重新开始都会创建独立的 `recordings/capture-<Unix纳秒>/` 目录，包含 AVI 和 CSV。红色 REC 状态显示时长和帧数；PREVIEW 表示未录像。提示只显示在窗口，不写入视频。Q/Esc/Ctrl-C 保存当前录像并退出。`--recordings-dir PATH` 指定交互录像的父目录；第一次开始录像之前不创建目录。
+
+`--record NEW_DIRECTORY` 仍可用于启动后立即录像；停止再开始的后续片段写入 `--recordings-dir`。额外加 `--stdin-control` 可在终端输入 `r`/`q` 后回车，便于终端控制和离线测试。按键/鼠标操作从下一张采集帧生效。`--fps` 仍为 AVI 标称回放帧率，不是采集时序。录像 I/O 错误会使程序失败退出；短时合成测试不能证明磁盘写满行为。旧进程只需重启一次加载新版，日常切换录像无需重启相机。

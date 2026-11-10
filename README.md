@@ -77,3 +77,29 @@ Either manual flag disables automatic exposure; omitted flags leave the correspo
 A 10-second recording decoded all 1018 frames. An 8-second dark-start recovery test decoded all 818 frames; grayscale mean rose from 18.70 to 95.68. This demonstrates brightness adaptation in this scene; continuous gain was enabled but stayed at 1, and white-balance mode was verified without controlled color-temperature testing. Bright lamps can still clip. No rotation or postprocessing was applied.
 
 **SDK metadata limitation:** `frames.csv` preserves raw SDK `exposure_us`/`analog_gain`; exposure stayed constant in frame metadata during visible automatic recovery, so these fields are not authoritative per-frame applied settings in auto mode. Startup/final live API queries provide separate snapshots. Automatic settings may persist across reopening; this program does not call nonvolatile-save APIs. Use `--auto` explicitly when starting to reapply and verify the monitoring profile.
+
+## USB permission recovery
+
+USB bus/device numbers change after reconnecting; a one-off `setfacl` does not survive replacement of the device node. The supplied rule grants the active local desktop user access only to USB VID:PID `04b4:d003`. Install once, then physically unplug/replug the camera:
+
+```bash
+sudo install -m 0644 config/70-dvp-monitor.rules /etc/udev/rules.d/70-dvp-monitor.rules
+sudo udevadm control --reload-rules
+# Unplug/replug, then:
+./build/dvp_monitor --list
+./build/dvp_monitor --auto
+```
+
+These administrator commands are operator-run, not executed by this project. `uaccess` targets the active local desktop session, not headless/remote service accounts. For a temporary fix, use `lsusb -d 04b4:d003` to find the CURRENT bus/device and apply `sudo setfacl -m u:alienware:rw /dev/bus/usb/BUS/DEVICE`. Do not reuse an old USB node number.
+
+The SDK may return successful enumeration but put `err:13,Permission denied` in `FriendlyName`. The monitor now rejects such entries and exits with a clear error without calling SDK open; explicitly selected names must also match an accessible enumeration entry. This avoids the observed permission-path crash; disconnect races inside the SDK are not thereby eliminated.
+
+## Start/stop recording without restarting
+
+```bash
+./build/dvp_monitor --auto --fps 60
+```
+
+Click **START RECORD / STOP RECORD** at the top left, or focus the preview window and press **R**. The preview continues after stopping; each next start creates a new `recordings/capture-<unix-nanoseconds>/` folder with AVI and CSV. A red REC status shows elapsed time and frame count; PREVIEW means nothing is being recorded. Overlays are display-only. Q/Esc/Ctrl-C finalizes any active clip and exits. `--recordings-dir PATH` selects the parent folder for interactive recordings; no folder is created until the first start.
+
+`--record NEW_DIRECTORY` remains an optional immediate-start mode; stopping and restarting then creates subsequent clips under `--recordings-dir`. `--stdin-control` additionally accepts `r`/`q` followed by Enter, useful for terminal control and offline tests. Keyboard and mouse actions take effect at the next acquired frame. `--fps` still describes nominal AVI playback, not capture timing. A recording I/O error fails the program; a short synthetic test does not certify disk-full behavior. Existing processes need one restart to load this version; ordinary recording toggles do not restart the camera.
