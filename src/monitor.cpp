@@ -1,5 +1,7 @@
 #include <DVPCamera.h>
 #include "control.hpp"
+#include "recording_timeline.hpp"
+#include <sstream>
 #include <dlfcn.h>
 #include <opencv2/opencv.hpp>
 #include <algorithm>
@@ -28,7 +30,7 @@ void check(dvpStatus status, const char* operation) {
 }
 struct Options {
     bool synthetic = false, headless = false, list = false, auto_all = false, stdin_control = false;
-    double fps = 30, duration = 0, exposure_us = -1, gain = -1;
+    double fps = 30, duration = 0, exposure_us = -1, gain = -1, synthetic_fps = -1;
     std::string camera, record, recordings_dir = "recordings", control_socket, codec = "h264";
 };
 double number(const std::string& value) {
@@ -211,12 +213,12 @@ int main(int argc, char** argv) try {
         };
         if (arg == "--help") {
             std::cout << "dvp_monitor [--list] [--camera FRIENDLY_NAME] [--record NEW_DIRECTORY]\n"
-                         "            [--fps 30] [--duration SECONDS] [--headless] [--synthetic]\n"
+                         "            [--fps 30] [--synthetic-fps RATE] [--duration SECONDS] [--headless] [--synthetic]\n"
                          "            [--auto | --exposure-us MICROSECONDS --gain SDK_GAIN]\n"
                          "            [--recordings-dir DIRECTORY] [--codec h264|mjpeg] [--stdin-control] [--control-socket auto|PATH]\n"
                          "R or the on-screen button toggles recording without stopping preview.\n"
                          "Preview by default. Q/Esc exits; Ctrl-C also exits. Recording defaults to H.264 MP4\n"
-                         "at nominal FPS plus per-frame CSV timestamps. No ROS or robot connection.\n";
+                         "at real-time CFR output FPS plus source and video CSV timestamps. No ROS or robot connection.\n";
             return 0;
         } else if (arg == "--list") opt.list = true;
         else if (arg == "--synthetic") opt.synthetic = true;
@@ -236,6 +238,10 @@ int main(int argc, char** argv) try {
             if (opt.gain < 0 || opt.gain > 1000) throw std::runtime_error("Gain outside allowed input range");
         }
         else if (arg == "--codec") opt.codec = value();
+        else if (arg == "--synthetic-fps") {
+            opt.synthetic_fps = number(value());
+            if (!opt.synthetic_fps || opt.synthetic_fps < 0 || opt.synthetic_fps > 500) throw std::runtime_error("Invalid synthetic FPS");
+        }
         else if (arg == "--fps") opt.fps = number(value());
         else if (arg == "--duration") opt.duration = number(value());
         else throw std::runtime_error("Unknown option: " + arg);
@@ -246,6 +252,7 @@ int main(int argc, char** argv) try {
         throw std::runtime_error("FPS must be (0,240]; duration must be >= 0");
     if (opt.auto_all && (opt.exposure_us > 0 || opt.gain >= 0))
         throw std::runtime_error("--auto cannot be combined with manual exposure/gain");
+    if (opt.synthetic_fps > 0 && !opt.synthetic) throw std::runtime_error("--synthetic-fps requires --synthetic");
     std::signal(SIGINT, stop);
     std::signal(SIGTERM, stop);
     std::unique_ptr<control::Server> control_server;
@@ -278,7 +285,9 @@ int main(int argc, char** argv) try {
         camera = std::make_unique<Camera>(opt.camera);
         camera->start(opt);
     } else if (opt.list) throw std::runtime_error("--list cannot be combined with --synthetic");
-    std::ofstream metadata;
+    std::ofstream metadata, capture_metadata;
+    RecordingTimeline timeline(opt.fps);
+    uint64_t capture_frames = 0;
     cv::VideoWriter video;
     const std::string video_filename = opt.codec == "h264" ? "video.mp4" : "video.avi";
     std::string recording_path;
@@ -300,6 +309,10 @@ int main(int argc, char** argv) try {
         control::put(result.get(), "codec", opt.codec);
         control::put(result.get(), "video_file", recording_path.empty() ? "" : (std::filesystem::path(recording_path) / video_filename).string());
         control::put(result.get(), "frames", static_cast<int64_t>(recorded_frames));
+        control::put(result.get(), "capture_frames", static_cast<int64_t>(capture_frames));
+        control::put(result.get(), "held_frames", static_cast<int64_t>(timeline.held_frames()));
+        control::put(result.get(), "timeline", "cfr_host_monotonic_v1");
+        json_object_object_add(result.get(), "recording_duration_s", json_object_new_double(timeline.duration()));
         control::put(result.get(), "first_frame_unix_ns", first_frame_unix_ns);
         control::put(result.get(), "last_frame_unix_ns", last_frame_unix_ns);
         control::put(result.get(), "reported_unix_ns", control::unix_ns());
@@ -309,35 +322,47 @@ int main(int argc, char** argv) try {
         return result;
     };
     auto save_manifest = [&](json_object* value) {
-        if (control_run.empty()) return;
-        auto temporary = std::filesystem::path(recording_path) / "run.json.tmp";
+        const std::string manifest_name = control_run.empty() ? "recording.json" : "run.json";
+        auto temporary = std::filesystem::path(recording_path) / (manifest_name + ".tmp");
         std::ofstream output;
         output.exceptions(std::ios::failbit | std::ios::badbit);
         output.open(temporary);
         output << control::dump(value) << '\n'; output.close();
-        std::filesystem::rename(temporary, std::filesystem::path(recording_path) / "run.json");
+        std::filesystem::rename(temporary, std::filesystem::path(recording_path) / manifest_name);
     };
-    auto stop_recording = [&](const std::string& reason = "manual") {
+    auto emit_video = [&](const cv::Mat& image, const CaptureSample& sample, uint64_t index, int64_t pts_ns, bool held) {
+        video.write(image);
+        metadata << index << ',' << sample.csv_fields << ',' << pts_ns << ',' << sample.source_index << ',' << held << '\n';
+        metadata.flush();
+        recorded_frames = index + 1;
+    };
+    auto stop_recording = [&](const std::string& reason = "manual") -> control::Json {
+        if (recording_path.empty()) return snapshot("idle");
+        const int64_t stop_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+        timeline.finish(stop_ns, emit_video);
         video.release();
         if (metadata.is_open()) metadata.close();
-        if (!recording_path.empty())
-            std::cout << "Saved " << recorded_frames << " frames to " << recording_path << std::endl;
-        if (!control_run.empty()) {
-            auto result = snapshot(recording_failed ? "failed" : "stopped", reason);
-            save_manifest(result.get());
-        }
+        if (capture_metadata.is_open()) capture_metadata.close();
+        std::cout << "Saved " << recorded_frames << " video frames from " << capture_frames << " captures to " << recording_path << std::endl;
+        auto result = snapshot(recording_failed ? "failed" : "stopped", reason);
+        save_manifest(result.get());
         recording_path.clear();
         control_run.clear(); control_model.clear();
+        return result;
     };
     auto start_recording = [&](const std::string& path) {
         if (!std::filesystem::create_directory(path))
             throw std::runtime_error("Recording directory already exists; choose a new directory");
         metadata.exceptions(std::ios::failbit | std::ios::badbit);
         metadata.open(path + "/frames.csv");
-        metadata << "index,sdk_frame_id,sdk_timestamp_raw,host_receive_steady_ns,host_receive_unix_ns,synthetic,exposure_us,analog_gain\n";
+        metadata << "index,sdk_frame_id,sdk_timestamp_raw,host_receive_steady_ns,host_receive_unix_ns,synthetic,exposure_us,analog_gain,video_pts_ns,source_index,held_frame\n";
+        capture_metadata.exceptions(std::ios::failbit | std::ios::badbit);
+        capture_metadata.open(path + "/capture.csv");
+        capture_metadata << "index,sdk_frame_id,sdk_timestamp_raw,host_receive_steady_ns,host_receive_unix_ns,synthetic,exposure_us,analog_gain\n";
         recording_failed = false;
         recording_path = std::filesystem::absolute(path).lexically_normal().string();
         recorded_frames = 0;
+        capture_frames = 0; timeline.reset();
         first_frame_unix_ns = 0; last_frame_unix_ns = 0;
         recording_start = Clock::now();
         std::cout << "Recording started: " << path << std::endl;
@@ -411,12 +436,14 @@ int main(int argc, char** argv) try {
                     throw std::runtime_error("Cannot open " + opt.codec + " encoder via OpenCV FFmpeg; no silent fallback");
             }
             if (image.size() != recorded_size) throw std::runtime_error("Resolution changed during recording");
-            video.write(image);
-            metadata << recorded_frames << ',' << frame.uFrameID << ',' << frame.uTimestamp << ',' << steady_ns << ',' << unix_ns << ',' << opt.synthetic << ',' << frame.fExposure << ',' << frame.fAGain << '\n';
-            metadata.flush();
-            if (!recorded_frames) first_frame_unix_ns = unix_ns;
+            std::ostringstream fields;
+            fields << frame.uFrameID << ',' << frame.uTimestamp << ',' << steady_ns << ',' << unix_ns << ',' << opt.synthetic << ',' << frame.fExposure << ',' << frame.fAGain;
+            capture_metadata << capture_frames << ',' << fields.str() << '\n';
+            capture_metadata.flush();
+            if (!capture_frames) first_frame_unix_ns = unix_ns;
             last_frame_unix_ns = unix_ns;
-            ++recorded_frames;
+            CaptureSample sample{steady_ns, unix_ns, capture_frames++, fields.str()};
+            timeline.push(image, sample, emit_video);
         };
         bool frame_written = false;
         if (control_server) control_server->poll([&](json_object* request) -> control::Json {
@@ -440,9 +467,7 @@ int main(int argc, char** argv) try {
                 if (command == "start" && model != control_model)
                     return control::error("metadata_conflict", "Same run_id has different model");
                 if (command != "stop") return snapshot("recording");
-                auto result = snapshot("stopped", "requested");
-                stop_recording("requested");
-                return result;
+                return stop_recording("requested");
             }
             const auto directory = std::filesystem::path(opt.recordings_dir) / ("run-" + run);
             if (std::filesystem::exists(directory)) {
@@ -499,7 +524,7 @@ int main(int argc, char** argv) try {
         }
         // Only the fake source is paced. Real capture keeps draining the SDK.
         if (opt.synthetic) {
-            next += std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1 / opt.fps));
+            next += std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1 / (opt.synthetic_fps > 0 ? opt.synthetic_fps : opt.fps)));
             std::this_thread::sleep_until(next);
         }
     }
@@ -519,7 +544,7 @@ int main(int argc, char** argv) try {
     video.release();
     if (metadata.is_open()) metadata.close();
     if (!opt.headless) cv::destroyAllWindows();
-    std::cout << "Stopped after " << frames << " frames. Video uses nominal FPS; CSV preserves host timing.\n";
+    std::cout << "Stopped after " << frames << " frames. Video uses real-time CFR; capture.csv preserves every source sample.\n";
     return !recording_failed && frames ? 0 : 1;
 } catch (const std::exception& error) {
     std::cerr << "Error: " << error.what() << '\n';

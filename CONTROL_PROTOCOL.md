@@ -36,7 +36,7 @@ Success replies contain `ok`, `version`, `state`, `owner` (`manual`, `inference`
 
 ## Artifacts and failure handling
 
-Clips are under `--recordings-dir/run-<run_id>/`, containing `video.mp4`, `frames.csv` and `run.json`. The manifest is written at acknowledged start and clean stop, not on every frame; active `status` is current. The client must save the returned path with the inference log. Frame-copy Unix times support approximate same-clock correlation, not hardware exposure or first-command synchronization; CSV also retains monotonic time. FPS is nominal playback timing. Existing SDK auto-exposure frame-metadata limitations remain.
+Clips are under `--recordings-dir/run-<run_id>/`, containing `video.mp4`, `frames.csv` and `run.json`. The manifest is written at acknowledged start and clean stop, not on every frame; active `status` is current. The client must save the returned path with the inference log. Frame-copy Unix times support approximate same-clock correlation, not hardware exposure or first-command synchronization; CSV also retains monotonic time. FPS defines the real-time CFR output timeline (see dated correction below). Existing SDK auto-exposure frame-metadata limitations remain.
 
 A client disconnect/lost reply does not roll back a command. On timeout, query/retry **the same run ID**; never immediately issue a fresh ID. A client crash or `SIGKILL` does not auto-stop recording: the inference side should use `try/finally` plus SIGINT/SIGTERM handling; an orphan recording requires explicit stop with its run ID or monitor shutdown. No timeout lease or automatic reattachment is implemented.
 
@@ -55,3 +55,9 @@ ctest --test-dir build --output-on-failure
 Synthetic tests cover first-frame acknowledgement, video decode, retries, manual ownership, conflicting runs, malformed/oversized/idle clients, listener conflict, normal exit, crash/restart, and a lost start reply. Live inference-to-camera integration remains for the inference task; no robot was operated by these tests.
 
 H.264 update: new clips default to H.264 MP4. Responses/manifests add `codec` (`h264` or `mjpeg`) and absolute `video_file`. Use the returned path; `--codec mjpeg` writes `video.avi`, and older manifests can omit these fields. Start confirms submission to the encoder, not a playable MP4; stop flushes the encoder and finalizes the container. Request protocol version remains 1.
+
+## Timeline correction — 2026-11-12
+
+New clips declare `timeline:cfr_host_monotonic_v1`. `nominal_fps` is now the real-time CFR output rate, independent of capture speed. `frames` remains the encoded video count; `capture_frames` counts all input samples, and `held_frames` counts held-image outputs. `recording_duration_s` measures first capture to stop (or latest capture while active), excluding encoder finalization. Video duration differs by at most one output period.
+
+`capture.csv` retains all captures. `frames.csv` aligns with decoded output and adds `video_pts_ns`, `source_index`, `held_frame`; original source timestamps can repeat for held images. Do not interpret repeats as fresh captures. `first_frame_unix_ns` / `last_frame_unix_ns` describe source captures, not the padded end of the output. Stop replies include the final resampled frame count after tail padding and flush. Request version and ownership semantics remain unchanged. Old files without the timeline marker are not repaired automatically. A catch-up gap over 5 seconds errors instead of unbounded duplication.

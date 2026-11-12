@@ -28,7 +28,7 @@ Run from this repository. Start with device discovery, then select a printed fri
 
 One camera is selected automatically if `--camera` is omitted. Q, Escape, window close or Ctrl-C stops capture and finalizes the video. `--headless` disables the window; `--duration 60` bounds the run. Recording starts immediately when `--record NEW_DIRECTORY` is supplied; its parent must exist and the directory must not already exist. Preview alone writes nothing.
 
-New recordings default to `video.mp4` (H.264) and `frames.csv`. Use `--codec mjpeg` for the previous `video.avi` format. `--fps` sets the **nominal playback FPS**, not the physical camera capture rate. Playback duration can differ from elapsed capture time. CSV records SDK frame ID/raw SDK timestamp and host monotonic/Unix timestamps after the image has been copied. Host timestamps are receive-side observations, not exposure timestamps; SDK timestamp units and clock relation are unverified. Synthetic records are explicitly marked.
+New recordings default to `video.mp4` (H.264) and `frames.csv`. Use `--codec mjpeg` for the previous `video.avi` format. `--fps` sets the **output video FPS**, not the physical camera capture rate. Since 2026-11-12, host monotonic timestamps resample the video onto this fixed-rate timeline; playback duration follows elapsed recording time within one output frame. CSV records SDK frame ID/raw SDK timestamp and host monotonic/Unix timestamps after the image has been copied. Host timestamps are receive-side observations, not exposure timestamps; SDK timestamp units and clock relation are unverified. Synthetic records are explicitly marked.
 
 Continuous capture requests BGR24 and disables external triggering for this open session; exposure and gain retain camera settings unless overridden; ROI retains camera settings. Unsupported formats/strides, SDK errors/timeouts, and resolution changes during recording fail explicitly. Stop/close is attempted on normal and exception exits. There is no automatic reconnection or frame replay.
 
@@ -102,7 +102,7 @@ The SDK may return successful enumeration but put `err:13,Permission denied` in 
 
 Click **START RECORD / STOP RECORD** at the top left, or focus the preview window and press **R**. The preview continues after stopping; each next start creates a new `recordings/capture-<unix-nanoseconds>/` folder with MP4 and CSV. A red REC status shows elapsed time and frame count; PREVIEW means nothing is being recorded. Overlays are display-only. Q/Esc/Ctrl-C finalizes any active clip and exits. `--recordings-dir PATH` selects the parent folder for interactive recordings; no folder is created until the first start.
 
-`--record NEW_DIRECTORY` remains an optional immediate-start mode; stopping and restarting then creates subsequent clips under `--recordings-dir`. `--stdin-control` additionally accepts `r`/`q` followed by Enter, useful for terminal control and offline tests. Keyboard and mouse actions take effect at the next acquired frame. `--fps` still describes nominal video playback, not capture timing. A recording I/O error fails the program; a short synthetic test does not certify disk-full behavior. Existing processes need one restart to load this version; ordinary recording toggles do not restart the camera.
+`--record NEW_DIRECTORY` remains an optional immediate-start mode; stopping and restarting then creates subsequent clips under `--recordings-dir`. `--stdin-control` additionally accepts `r`/`q` followed by Enter, useful for terminal control and offline tests. Keyboard and mouse actions take effect at the next acquired frame. `--fps` controls real-time CFR output; capture can run faster or slower. A recording I/O error fails the program; a short synthetic test does not certify disk-full behavior. Existing processes need one restart to load this version; ordinary recording toggles do not restart the camera.
 
 ## Inference-triggered recording
 
@@ -114,8 +114,24 @@ New recordings use H.264 in MP4 (`video.mp4`) via the installed OpenCV FFmpeg ba
 
 This uses the local software encoder defaults (no explicit bitrate/CRF or GPU selection). H.264 is lossy; fine texture can lose detail. On the same 120 decoded low-motion real-camera frames, MJPEG was 18,281,348 bytes and H.264 358,392 bytes (98.04% smaller), with encode/finalize times 1.389 s and 1.218 s. Mean PSNR against the already-MJPEG-decoded source was 47.59 dB and 35.64 dB respectively; this is a comparative re-encode check, not raw-sensor fidelity or a universal size/speed guarantee. Evidence: `recordings/h264-check/comparison.json`.
 
-Encoder buffering means first-frame submission acknowledgement is not proof of an immediately playable MP4; stop waits for encoder flush and MP4 finalization. SIGKILL/power loss can leave an incomplete MP4. Recording FPS retains its previous nominal playback meaning. Codec verification (requires installed `ffprobe`):
+Encoder buffering means first-frame submission acknowledgement is not proof of an immediately playable MP4; stop waits for encoder flush and MP4 finalization. SIGKILL/power loss can leave an incomplete MP4. The 2026-11-12 timeline correction below supersedes the old frame-per-capture timing. Codec verification (requires installed `ffprobe`):
 
 ```bash
 /usr/bin/python3 tests/codec_test.py build/dvp_monitor
+```
+
+## Real-time playback correction — 2026-11-12
+
+Previously every capture was written once at the chosen playback FPS: approximately 100 captures/s written at 60 FPS played at 0.6× speed. New recordings use `cfr_host_monotonic_v1`. First capture anchors time zero; one output slot per `1/--fps` second selects the first capture reaching that slot. Faster inputs are skipped; missing slots hold the most recently received image. Normal stop fills the final fractional interval up to the stop request time, before encoder finalization. Playback duration differs from first-capture-to-stop duration by at most one output frame. This uses host image-copy completion time, not hardware exposure time.
+
+- `capture.csv`: every input capture during the clip, with original timestamps and SDK metadata.
+- `frames.csv`: one row per encoded video frame, preserving its source timestamps plus `video_pts_ns`, `source_index` (row in capture.csv), and `held_frame` (1 for held imagery). Held images never receive a fabricated fresh source timestamp.
+- Status/manifests retain `frames` as encoded video count and add `capture_frames`, `held_frames`, `timeline`, `recording_duration_s`. These counts can differ. Manual clips now also save `recording.json`; inference clips retain `run.json`.
+
+Capture/encoding remain serial. A missing interval requiring more than 5 seconds of repeated output fails instead of creating an unbounded backlog or silently compressing time. Camera disconnect errors still stop the process; no fake continued camera health is implied. Existing files are not rewritten. Older manifests without `timeline` retain the old timing behavior.
+
+`--synthetic-fps RATE` (synthetic mode only) independently sets test input rate. Deterministic tests cover 20/60/100/150 Hz input, irregular gaps and rejection of regressed/long gaps. End-to-end test:
+
+```bash
+/usr/bin/python3 tests/realtime_recording_test.py build/dvp_monitor
 ```

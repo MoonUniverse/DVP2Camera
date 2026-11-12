@@ -37,3 +37,7 @@ set_tests_properties(conflicting_auto_exposure conflicting_auto_gain PROPERTIES 
 
 add_test(NAME invalid_codec COMMAND dvp_monitor --synthetic --headless --codec invalid)
 set_tests_properties(invalid_codec PROPERTIES WILL_FAIL TRUE)
+add_executable(timeline_test tests/timeline_test.cpp)
+target_include_directories(timeline_test PRIVATE src ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(timeline_test PRIVATE ${OpenCV_LIBS})
+add_test(NAME recording_timeline COMMAND timeline_test)

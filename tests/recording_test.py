@@ -20,7 +20,10 @@ with tempfile.TemporaryDirectory() as directory:
     assert len(rows) >= 2
     assert all(row["synthetic"] == "1" for row in rows)
     times = [int(row["host_receive_steady_ns"]) for row in rows]
-    assert all(a < b for a, b in zip(times, times[1:]))
+    assert all(a <= b for a, b in zip(times, times[1:]))
+    with (recording / "capture.csv").open() as stream:
+        capture_times = [int(row["host_receive_steady_ns"]) for row in csv.DictReader(stream)]
+    assert all(a < b for a, b in zip(capture_times, capture_times[1:]))
     capture = cv2.VideoCapture(str(recording / "video.mp4"))
     decoded = 0
     while True:
