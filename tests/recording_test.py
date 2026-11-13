@@ -82,7 +82,7 @@ with tempfile.TemporaryDirectory() as directory:
     def wait_frames(folder, minimum):
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            matches = sorted(folder.glob("capture-*/frames.csv"))
+            matches = sorted(folder.glob("*_manual/frames.csv"))
             if matches:
                 lines = matches[-1].read_text().splitlines()
                 if len(lines) >= minimum + 1:
@@ -103,7 +103,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert first_csv.read_bytes() == saved and process.poll() is None
         send("r")
         deadline = time.monotonic() + 5
-        while len(list(clips.glob("capture-*"))) < 2:
+        while len(list(clips.glob("*_manual"))) < 2:
             assert time.monotonic() < deadline
             time.sleep(0.02)
         second_csv = wait_frames(clips, 4)

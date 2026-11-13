@@ -99,7 +99,7 @@ SDK 可能返回枚举成功，却把 `err:13,Permission denied` 填入 `Friendl
 ./build/dvp_monitor --auto --fps 60
 ```
 
-点击左上角 **START RECORD / STOP RECORD** 按钮，或先选中预览窗口再按 **R**。停止录像后预览继续；每次重新开始都会创建独立的 `recordings/capture-<Unix纳秒>/` 目录，包含 MP4 和 CSV。红色 REC 状态显示时长和帧数；PREVIEW 表示未录像。提示只显示在窗口，不写入视频。Q/Esc/Ctrl-C 保存当前录像并退出。`--recordings-dir PATH` 指定交互录像的父目录；第一次开始录像之前不创建目录。
+点击左上角 **START RECORD / STOP RECORD** 按钮，或先选中预览窗口再按 **R**。停止录像后预览继续；每次重新开始都会创建独立的 `recordings/YYYY-MM-DD_HH-MM-SS_mmm_manual/` 目录，包含 MP4 和 CSV。红色 REC 状态显示时长和帧数；PREVIEW 表示未录像。提示只显示在窗口，不写入视频。Q/Esc/Ctrl-C 保存当前录像并退出。`--recordings-dir PATH` 指定交互录像的父目录；第一次开始录像之前不创建目录。
 
 `--record NEW_DIRECTORY` 仍可用于启动后立即录像；停止再开始的后续片段写入 `--recordings-dir`。额外加 `--stdin-control` 可在终端输入 `r`/`q` 后回车，便于终端控制和离线测试。按键/鼠标操作从下一张采集帧生效。`--fps` 仍为 视频标称回放帧率，不是采集时序。录像 I/O 错误会使程序失败退出；短时合成测试不能证明磁盘写满行为。旧进程只需重启一次加载新版，日常切换录像无需重启相机。
 
@@ -134,3 +134,7 @@ SDK 可能返回枚举成功，却把 `err:13,Permission denied` 填入 `Friendl
 ```bash
 /usr/bin/python3 tests/realtime_recording_test.py build/dvp_monitor
 ```
+
+## 北京时间目录 — 2026-11-13
+
+新目录使用固定北京时间（UTC+08:00），不受系统时区影响；按名称可按开始时间排序。手动录像为 `YYYY-MM-DD_HH-MM-SS_mmm_manual/`，推理录像为 `YYYY-MM-DD_HH-MM-SS_mmm_inference-<run_id>/`。同毫秒重名时在类型前增加序号，避免覆盖。显式 `--record PATH` 保持用户路径。旧目录不重命名；旧 `run-<run_id>/` 仍支持查询、停止和幂等重试，新目录在进程重启后也能按运行 ID 找回。客户端必须使用返回的 `path` 和 `video_file`，不要拼接目录。

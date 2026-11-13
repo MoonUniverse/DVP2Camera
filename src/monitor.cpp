@@ -2,6 +2,8 @@
 #include "control.hpp"
 #include "recording_timeline.hpp"
 #include <sstream>
+#include <ctime>
+#include <iomanip>
 #include <dlfcn.h>
 #include <opencv2/opencv.hpp>
 #include <algorithm>
@@ -27,6 +29,45 @@ using Clock = std::chrono::steady_clock;
 void check(dvpStatus status, const char* operation) {
     if (status != DVP_STATUS_OK)
         throw std::runtime_error(std::string(operation) + ": SDK status " + std::to_string(status));
+}
+// Fixed UTC+08:00, independent of the workstation's TZ setting.
+std::string beijing_stamp() {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::time_t seconds = ms / 1000 + 8 * 3600;
+    std::tm calendar{};
+    if (!gmtime_r(&seconds, &calendar)) throw std::runtime_error("Cannot format recording time");
+    std::ostringstream name;
+    name << std::put_time(&calendar, "%Y-%m-%d_%H-%M-%S_")
+         << std::setw(3) << std::setfill('0') << ms % 1000;
+    return name.str();
+}
+std::filesystem::path dated_directory(const std::filesystem::path& root, const std::string& kind) {
+    const auto stamp = beijing_stamp();
+    auto result = root / (stamp + "_" + kind);
+    for (unsigned collision = 1; std::filesystem::exists(result); ++collision)
+        result = root / (stamp + "_" + std::to_string(collision) + "_" + kind);
+    return result;
+}
+std::filesystem::path find_run(const std::filesystem::path& root, const std::string& run) {
+    const auto legacy = root / ("run-" + run);
+    if (std::filesystem::exists(legacy)) return legacy;
+    if (!std::filesystem::exists(root)) return {};
+    const std::string suffix = "_inference-" + run;
+    std::filesystem::path found;
+    for (const auto& entry : std::filesystem::directory_iterator(root)) {
+        const auto name = entry.path().filename().string();
+        if (!entry.is_directory() || name.size() < 23 + suffix.size() ||
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+        const auto middle = name.substr(23, name.size() - 23 - suffix.size());
+        if (!middle.empty() && (middle.size() < 2 || middle[0] != '_' ||
+            !std::all_of(middle.begin() + 1, middle.end(), [](unsigned char c) {
+                return c >= '0' && c <= '9';
+            }))) continue;
+        if (!found.empty()) throw std::runtime_error("Multiple recording directories for run_id: " + run);
+        found = entry.path();
+    }
+    return found;
 }
 struct Options {
     bool synthetic = false, headless = false, list = false, auto_all = false, stdin_control = false;
@@ -376,10 +417,7 @@ int main(int argc, char** argv) try {
             stop_recording();
         } else {
             std::filesystem::create_directories(opt.recordings_dir);
-            auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            start_recording((std::filesystem::path(opt.recordings_dir) /
-                             ("capture-" + std::to_string(stamp))).string());
+            start_recording(dated_directory(opt.recordings_dir, "manual").string());
         }
     };
     if (!opt.record.empty()) start_recording(opt.record);
@@ -469,8 +507,8 @@ int main(int argc, char** argv) try {
                 if (command != "stop") return snapshot("recording");
                 return stop_recording("requested");
             }
-            const auto directory = std::filesystem::path(opt.recordings_dir) / ("run-" + run);
-            if (std::filesystem::exists(directory)) {
+            auto directory = find_run(opt.recordings_dir, run);
+            if (!directory.empty()) {
                 std::ifstream input(directory / "run.json");
                 if (!input) return control::error("incomplete_run", "Existing run has no readable manifest; choose a new run_id");
                 std::string raw((std::istreambuf_iterator<char>(input)), {});
@@ -488,6 +526,7 @@ int main(int argc, char** argv) try {
             if (command != "start") return control::error("unknown_run", "No recording for this run_id");
             if (!recording_path.empty()) return control::error("busy", "A manual recording or another run owns the recorder");
             std::filesystem::create_directories(opt.recordings_dir);
+            directory = dated_directory(opt.recordings_dir, "inference-" + run);
             try {
                 start_recording(directory.string());
                 control_run = run; control_model = model;

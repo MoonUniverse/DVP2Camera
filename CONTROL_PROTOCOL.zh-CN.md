@@ -36,7 +36,7 @@
 
 ## 产物与故障处理
 
-片段位于 `--recordings-dir/run-<run_id>/`，包含 `video.mp4`、`frames.csv`、`run.json`。清单在开始确认和正常停止时写入，不逐帧刷新；活动运行的 `status` 是当前状态。客户端应将返回路径写进推理日志。帧拷贝后的 Unix 时间用于相同时钟下的近似对应，不代表硬件曝光或首条指令同步；CSV 也保留单调时钟时间。FPS 定义实时 CFR 输出时间轴（见下方日期修正）。既有 SDK 自动曝光帧元数据限制仍适用。
+片段位于 `--recordings-dir/YYYY-MM-DD_HH-MM-SS_mmm_inference-<run_id>/`，包含 `video.mp4`、`frames.csv`、`run.json`。清单在开始确认和正常停止时写入，不逐帧刷新；活动运行的 `status` 是当前状态。客户端应将返回路径写进推理日志。帧拷贝后的 Unix 时间用于相同时钟下的近似对应，不代表硬件曝光或首条指令同步；CSV 也保留单调时钟时间。FPS 定义实时 CFR 输出时间轴（见下方日期修正）。既有 SDK 自动曝光帧元数据限制仍适用。
 
 客户端断连/丢失响应不撤销命令。超时后查询或重试**同一个运行 ID**，不要立即使用新 ID。客户端崩溃或 `SIGKILL` 不会自动停止录像：推理侧应使用 `try/finally` 及 SIGINT/SIGTERM 处理；孤立录像需要按其 ID 显式 stop 或退出监控程序。未实现超时租约或自动重新绑定。
 
@@ -61,3 +61,7 @@ H.264 更新：新片段默认 H.264 MP4，响应/清单新增 `codec`（`h264` 
 新片段声明 `timeline:cfr_host_monotonic_v1`。`nominal_fps` 现在是按真实时间生成的 CFR 输出帧率，与采集速度独立。`frames` 仍为视频编码帧数；`capture_frames` 计数全部输入样本，`held_frames` 计数保持图像的输出帧。`recording_duration_s` 表示首帧至停止时刻（活动状态下至最新采集帧）的时长，不含编码器收尾。视频时长误差不超过一个输出帧周期。
 
 `capture.csv` 保留全部采集帧。`frames.csv` 对齐解码输出，新增 `video_pts_ns`、`source_index`、`held_frame`；保持图像时原始来源时间戳可重复，不可将其视为新采集帧。`first_frame_unix_ns` / `last_frame_unix_ns` 描述来源采集帧，不是补齐后的输出结束时刻。stop 响应在尾部补齐与刷新后包含最终编码帧数。请求版本和所有权语义不变。没有时间轴标记的旧文件不会自动修复。需要补齐超过 5 秒的间隔时明确报错，不无限复制。
+
+## 北京时间目录 — 2026-11-13
+
+新目录使用固定北京时间（UTC+08:00），不受系统时区影响；按名称可按开始时间排序。手动录像为 `YYYY-MM-DD_HH-MM-SS_mmm_manual/`，推理录像为 `YYYY-MM-DD_HH-MM-SS_mmm_inference-<run_id>/`。同毫秒重名时在类型前增加序号，避免覆盖。显式 `--record PATH` 保持用户路径。旧目录不重命名；旧 `run-<run_id>/` 仍支持查询、停止和幂等重试，新目录在进程重启后也能按运行 ID 找回。客户端必须使用返回的 `path` 和 `video_file`，不要拼接目录。

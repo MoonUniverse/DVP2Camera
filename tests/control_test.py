@@ -1,4 +1,5 @@
 """Black-box IPC and recording lifecycle regressions, synthetic sources only."""
+from datetime import datetime, timezone, timedelta
 import csv
 import importlib.util
 import json
@@ -45,7 +46,7 @@ with tempfile.TemporaryDirectory() as temporary:
     def launch(*extra):
         p = subprocess.Popen([binary, "--synthetic", "--headless", "--stdin-control", "--fps", "20",
                               "--control-socket", endpoint, "--recordings-dir", str(recordings), *extra],
-                             stdin=subprocess.PIPE, text=True)
+                             stdin=subprocess.PIPE, text=True, env={**os.environ, "TZ": "America/New_York"})
         wait_for(lambda: Path(endpoint).exists() or p.poll() is not None)
         assert p.poll() is None
         return p
@@ -71,6 +72,9 @@ with tempfile.TemporaryDirectory() as temporary:
         assert start["ok"] and start["state"] == "recording" and start["frames"] >= 1
         assert start["first_frame_unix_ns"] > 0
         assert start["codec"] == "h264" and start["video_file"].endswith("/video.mp4")
+        stamp = datetime.strptime(Path(start["path"]).name[:23], "%Y-%m-%d_%H-%M-%S_%f")
+        assert abs((datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None) - stamp).total_seconds()) < 5
+        assert Path(start["path"]).name.endswith("_inference-trial_1")
         again = call("start", "trial_1", "checkpoint-A")
         assert again["path"] == start["path"]
         assert not call("start", "trial_1", "checkpoint-B")["ok"]
@@ -101,7 +105,17 @@ with tempfile.TemporaryDirectory() as temporary:
         state = json.loads((Path(active["path"]) / "run.json").read_text())
         assert state["state"] == "stopped" and state["reason"] == "monitor_exit"
         decode(active["path"])
+        # Simulate an untouched legacy directory from a prior monitor version.
+        legacy = recordings / "run-legacy"
+        legacy.mkdir()
+        legacy_state = dict(state, run_id="legacy", path=str(legacy))
+        (legacy / "run.json").write_text(json.dumps(legacy_state))
+        incomplete = recordings / "run-incomplete"
+        incomplete.mkdir()
         p = launch()
+        for command in ("status", "stop", "start"):
+            assert call(command, "legacy", "checkpoint-A")["path"] == str(legacy)
+        assert call("start", "incomplete")["error"] == "incomplete_run"
         assert call("status", "trial_1")["state"] == "stopped"
         # Unexpected exit leaves run explicitly interrupted, never replayed.
         interrupted = call("start", "crashed", "checkpoint-A")
@@ -112,6 +126,12 @@ with tempfile.TemporaryDirectory() as temporary:
         assert call("status", "crashed")["state"] == "interrupted"
         assert call("start", "crashed", "checkpoint-A")["state"] == "interrupted"
         assert call("status")["state"] == "idle"
+        # Run IDs containing the naming delimiter must not alias another run.
+        long_run = call("start", "prefix_inference-short", "A")
+        call("stop", "prefix_inference-short")
+        short_run = call("start", "short", "A")
+        assert short_run["path"] != long_run["path"] and short_run["state"] == "recording"
+        call("stop", "short")
         # Lost response: disconnect after send; same run query/retry resolves outcome.
         with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as channel:
             channel.connect(endpoint)

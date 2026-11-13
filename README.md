@@ -100,7 +100,7 @@ The SDK may return successful enumeration but put `err:13,Permission denied` in 
 ./build/dvp_monitor --auto --fps 60
 ```
 
-Click **START RECORD / STOP RECORD** at the top left, or focus the preview window and press **R**. The preview continues after stopping; each next start creates a new `recordings/capture-<unix-nanoseconds>/` folder with MP4 and CSV. A red REC status shows elapsed time and frame count; PREVIEW means nothing is being recorded. Overlays are display-only. Q/Esc/Ctrl-C finalizes any active clip and exits. `--recordings-dir PATH` selects the parent folder for interactive recordings; no folder is created until the first start.
+Click **START RECORD / STOP RECORD** at the top left, or focus the preview window and press **R**. The preview continues after stopping; each next start creates a new `recordings/YYYY-MM-DD_HH-MM-SS_mmm_manual/` folder with MP4 and CSV. A red REC status shows elapsed time and frame count; PREVIEW means nothing is being recorded. Overlays are display-only. Q/Esc/Ctrl-C finalizes any active clip and exits. `--recordings-dir PATH` selects the parent folder for interactive recordings; no folder is created until the first start.
 
 `--record NEW_DIRECTORY` remains an optional immediate-start mode; stopping and restarting then creates subsequent clips under `--recordings-dir`. `--stdin-control` additionally accepts `r`/`q` followed by Enter, useful for terminal control and offline tests. Keyboard and mouse actions take effect at the next acquired frame. `--fps` controls real-time CFR output; capture can run faster or slower. A recording I/O error fails the program; a short synthetic test does not certify disk-full behavior. Existing processes need one restart to load this version; ordinary recording toggles do not restart the camera.
 
@@ -135,3 +135,7 @@ Capture/encoding remain serial. A missing interval requiring more than 5 seconds
 ```bash
 /usr/bin/python3 tests/realtime_recording_test.py build/dvp_monitor
 ```
+
+## Beijing-time directories — 2026-11-13
+
+New directories use fixed Beijing time (UTC+08:00), independent of the system timezone, and sort by start time by name. Manual clips use `YYYY-MM-DD_HH-MM-SS_mmm_manual/`; inference clips use `YYYY-MM-DD_HH-MM-SS_mmm_inference-<run_id>/`. Millisecond collisions add a counter before the type to prevent overwriting. Explicit `--record PATH` keeps the supplied path. Old directories are not renamed; legacy `run-<run_id>/` supports queries, stop and idempotent retries. New directories remain discoverable by run ID after process restart. Clients must use returned `path` and `video_file`, not construct directory names.
